@@ -58,35 +58,110 @@ Everything listed is wired up and covered by a passing test — nothing here is 
 
 ## Running it
 
-### Locally
+Four ways, depending on what you want. **1** is the everyday one.
+
+### 1. Maven — one command, nothing to set up
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
-`spring-boot:run` activates the `local` profile (configured in `pom.xml`), and
-`spring-boot-docker-compose` starts `compose.yaml`, waits for the health check and points the
-datasource at it. No manual `docker compose up`, no local PostgreSQL install.
+*Needs:* JDK 21+ and a running Docker. Nothing else — no local PostgreSQL, no `docker compose up`.
 
-The container publishes host port **55432**, not 5432 — machines commonly have a native PostgreSQL
-on the default port, and the resulting failure (`role "template" does not exist`, because the app
-silently connected to the *other* database) is a bad first impression for a template. Override with
-`DB_HOST_PORT` if needed.
+`spring-boot:run` activates the `local` profile (configured on the plugin in `pom.xml`), and
+`spring-boot-docker-compose` starts `compose.yaml`, waits for its health check, points the
+datasource at it, and stops the container when you stop the app. Flyway migrates on startup.
 
-Under `local`, security permits every request but **method security stays on**: the anonymous
-principal is granted the authorities the `@PreAuthorize` rules ask for. Local development exercises
-the real rules rather than a build with authorisation compiled out.
+Then:
 
-### From the IDE
+| | |
+| --- | --- |
+| API | <http://localhost:8080/api/customers> |
+| Swagger UI | <http://localhost:8080/swagger-ui.html> |
+| OpenAPI JSON | <http://localhost:8080/v3/api-docs> |
+| Health | <http://localhost:8080/actuator/health> |
+| Metrics | <http://localhost:8080/actuator/prometheus> |
 
-Run `TestTemplateApplication` (in `src/test/java`). Same application, dependencies supplied by
-Testcontainers instead of Compose — nothing to clean up afterwards.
+Under `local` no token is needed, so plain `curl` works:
+
+```bash
+curl -X POST localhost:8080/api/customers \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","displayName":"Ada Lovelace"}'
+
+curl localhost:8080/api/customers
+curl -H 'X-API-Version: 1.1' localhost:8080/api/customers/<id>   # richer representation
+```
+
+### 2. From the IDE — Testcontainers instead of Compose
+
+Run **`TestTemplateApplication`** (in `src/test/java`), not `TemplateApplication`. Same app, but the
+database is a throwaway Testcontainers instance, and it sets the `local` profile for you. Nothing to
+clean up afterwards.
+
+Running `TemplateApplication` directly will fail — it gets no profile, and the production security
+configuration refuses to start without `OAUTH2_ISSUER_URI`. That is deliberate; see
+[Security posture](#security-posture). If your IDE lets you set a run-configuration profile, set
+`local` and it behaves like option 1 minus the Compose integration.
+
+### 3. Standalone jar
+
+```bash
+./mvnw clean package
+docker compose up -d --wait
+
+SPRING_PROFILES_ACTIVE=local \
+DB_URL="jdbc:postgresql://localhost:$(docker compose port postgres 5432 | cut -d: -f2)/template" \
+java -jar target/spring-boot-template-0.0.1-SNAPSHOT.jar
+```
+
+**`DB_URL` is not optional here.** Spring Boot deliberately excludes `spring-boot-docker-compose`
+from the repackaged jar — it is a development-time convenience, not something you want a production
+artefact doing — so a packaged app never starts Compose for you. Start the database yourself and
+tell the app where it is.
+
+Stop with `docker compose down` when finished.
+
+### 4. No Docker at all — your own PostgreSQL
+
+If you already run PostgreSQL locally (many machines do, on 5432), create the database once:
+
+```sql
+CREATE ROLE template LOGIN PASSWORD 'template';
+CREATE DATABASE template OWNER template;
+```
+
+then point the app at it and turn the Compose integration off:
+
+```bash
+SPRING_PROFILES_ACTIVE=local \
+SPRING_DOCKER_COMPOSE_ENABLED=false \
+DB_URL=jdbc:postgresql://localhost:5432/template \
+DB_USERNAME=template DB_PASSWORD=template \
+./mvnw spring-boot:run
+```
+
+Flyway creates the schema on first start.
+
+### A note on port 5432
+
+`compose.yaml` publishes the container on host port **55432**, not 5432. Plenty of machines already
+run a native PostgreSQL on the default port, and the failure mode is genuinely confusing: the
+container starts fine, the app connects to the *other* database, and the error is
+`role "template" does not exist` rather than anything about a port clash. Override with
+`DB_HOST_PORT` if 55432 is taken too.
+
+To connect a database tool or `psql`:
+
+```bash
+psql -h localhost -p 55432 -U template -d template   # password: template
+```
 
 ### Tests
 
 ```bash
-./mvnw test      # fast: unit + slice tests only        (~5s)
-./mvnw verify    # adds *IT tests on real PostgreSQL     (~25s)
+./mvnw test      # fast: unit + slice tests only        (~5s, no Docker needed)
+./mvnw verify    # adds *IT tests on real PostgreSQL     (~25s, needs Docker)
 ```
 
 ### Container image
@@ -95,6 +170,15 @@ Testcontainers instead of Compose — nothing to clean up afterwards.
 ./mvnw spring-boot:build-image   # Cloud Native Buildpacks — no Dockerfile to maintain
 docker build -t template .       # or the checked-in multi-stage Dockerfile
 ```
+
+### If it will not start
+
+| Symptom | Cause |
+| --- | --- |
+| `role "template" does not exist` | Connected to a different PostgreSQL — see the port note above. |
+| `Parameter 0 … required a bean of type 'JwtDecoder'` | Running without the `local` profile and without `OAUTH2_ISSUER_URI`. Working as designed. |
+| `Cannot connect to the Docker daemon` | Docker is not running; options 1, 2 and 3 all need it. |
+| Port 8080 in use | `SERVER_PORT=8081 ./mvnw spring-boot:run` |
 
 ---
 
