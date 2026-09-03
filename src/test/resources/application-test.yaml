@@ -1,0 +1,34 @@
+# Overrides for the `test` profile. Kept minimal on purpose: the closer the test
+# configuration is to production configuration, the more the tests are worth.
+spring:
+  docker:
+    compose:
+      # Testcontainers owns the database in tests; Compose would be a second one.
+      enabled: false
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    # Migrations run in tests too, so a broken migration fails the build rather than
+    # the deploy — and the tests assert against the schema that will actually ship.
+    enabled: true
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN
+
+app:
+  environment: test
+  api:
+    max-page-size: 100
+    allowed-origins: ""
+  notifications:
+    enabled: false
+    max-retries: 1
+    retry-delay: 10ms

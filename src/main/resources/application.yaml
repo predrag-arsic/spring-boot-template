@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# Base configuration — shared by every environment.
+#
+# Conventions this file follows:
+#   * YAML, not .properties: nesting makes the shape of the configuration visible,
+#     and lists (supported versions, allowed origins) stay readable.
+#   * Every environment-specific or secret value is an ${ENV_VAR} reference.
+#     A default is provided only where the default is safe everywhere.
+#   * Profile-specific overrides live in application-<profile>.yaml, never in
+#     if/else inside the application.
+# ---------------------------------------------------------------------------
+spring:
+  application:
+    name: spring-boot-template
+
+  main:
+    banner-mode: off
+
+  threads:
+    # Virtual threads (Java 21+). Each request gets its own carrier-free thread, so a
+    # blocking JDBC or HTTP call no longer occupies a platform thread. This is what
+    # makes plain blocking Spring MVC scale like a reactive stack for I/O-bound work,
+    # without the debugging cost of WebFlux. Watch for `synchronized` blocks around
+    # blocking calls in older libraries — they pin the carrier thread.
+    virtual:
+      enabled: true
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/template}
+    username: ${DB_USERNAME:template}
+    password: ${DB_PASSWORD:template}
+    hikari:
+      # Small pools beat large ones: the database, not the app, is the bottleneck, and
+      # a pool bigger than the database's worker count just moves the queue.
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      # Hikari's own settings are plain milliseconds — they are bound straight onto
+      # HikariConfig and do not go through Spring's Duration converter, so `3s` here
+      # fails at startup. Spring-owned properties elsewhere in this file do take
+      # durations; the inconsistency is Hikari's, and it is worth a comment.
+      connection-timeout: 3000
+      # Logs a stack trace for a connection held longer than this — finds the
+      # long-running transaction before it exhausts the pool in production.
+      leak-detection-threshold: 30000
+
+  jpa:
+    # Flyway owns the schema. `ddl-auto` beyond `validate` means the schema in
+    # production is whatever Hibernate inferred that day, which is not a schema anyone
+    # can review or roll back.
+    hibernate:
+      ddl-auto: validate
+    # Off, deliberately. Open-Session-In-View keeps a database connection checked out
+    # for the whole request so lazy associations can be resolved during serialisation.
+    # It hides N+1 queries and ties connection lifetime to response time. Load what you
+    # need in the service layer instead.
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+        # Fails the build-up of an N+1: any query planned in more than this many
+        # statements is worth knowing about in dev.
+        query:
+          in_clause_parameter_padding: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    # Refuse to run against a database whose history does not match — a checksum
+    # mismatch means someone edited an applied migration.
+    validate-on-migrate: true
+
+  mvc:
+    # RFC 9457 problem+json for framework-raised errors too, so a validation failure
+    # and a 404 from Spring itself look like the errors our own handler produces.
+    problemdetails:
+      enabled: true
+    apiversion:
+      use:
+        header: X-API-Version
+      # Requests without the header are served version 1.0 — existing clients keep
+      # working when a new version ships.
+      default: "1.0"
+      required: false
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # No default on purpose. An unset issuer means no JwtDecoder, which means the
+          # context refuses to start rather than starting without token validation.
+          issuer-uri: ${OAUTH2_ISSUER_URI:}
+
+  # The declarative HTTP clients registered in HttpClientConfig. One block per group.
+  http:
+    serviceclient:
+      notifications:
+        base-url: ${NOTIFICATIONS_BASE_URL:http://localhost:8081}
+        connect-timeout: 2s
+        # Always set a read timeout. The default in most HTTP stacks is "forever",
+        # and a downstream that accepts the connection then hangs will exhaust this
+        # service's threads long before it returns an error.
+        read-timeout: 5s
+
+server:
+  # Behind a load balancer or ingress, trust X-Forwarded-* so generated URLs and
+  # logged client IPs are the real ones.
+  forward-headers-strategy: framework
+  shutdown: graceful
+  error:
+    # Never echo stack traces or messages from the default error page.
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Explicit list, not `*`. Every exposed endpoint is attack surface;
+        # `env` and `configprops` in particular can disclose configuration.
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # Details only for an authenticated operator; an anonymous probe sees UP/DOWN.
+      show-details: when-authorized
+      roles: OPERATOR
+      # Kubernetes-style /actuator/health/liveness and /readiness.
+      probes:
+        enabled: true
+  health:
+    # Do not report the service healthy while it is draining.
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  tracing:
+    sampling:
+      # 10% in production is a reasonable cost/visibility trade; overridden to 1.0
+      # in local and test profiles.
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+  observations:
+    key-values:
+      application: spring-boot-template
+
+logging:
+  level:
+    root: INFO
+    io.vaullet.template: ${LOG_LEVEL:INFO}
+  # Trace and span ids in every line, so a log search and a trace view agree.
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+
+# ---------------------------------------------------------------------------
+# Application-owned settings. Bound and validated by ApplicationProperties.
+# ---------------------------------------------------------------------------
+app:
+  environment: ${APP_ENVIRONMENT:unknown}
+  api:
+    max-page-size: 100
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  notifications:
+    enabled: ${NOTIFICATIONS_ENABLED:true}
+    max-retries: 3
+    retry-delay: 200ms
